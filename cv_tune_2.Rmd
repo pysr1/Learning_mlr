@@ -1,0 +1,150 @@
+---
+title: "pysrs MLR notes 2"
+output: html_notebook
+---
+
+### Crossvalidation and Model Tuning:
+
+In the first part of these MLR notes, I went over how to create an MLR task and learner and also covered how to do preprocessing using both tidyverse and MLR tools.  In this notebook I am going to cover cross-validation and parameter tuning.  It's no secret that historically, end to end machine learing has been easier in python than R. Part of the reason python was so much better for machine learning historically was because it handled cross-validation and parameter tuning much better than R.  In 2019 we can handle cross-validation and parameter tuning nearly has well as in python using the MLR package.
+
+I'm going to use the Boston Housing dataset again in this notebook. I'll create the same quick plot I did in the last notebook.
+
+```{r, warning=FALSE}
+library(MASS)
+library(rsample)
+library(recipes)
+library(tidyverse)
+library(mlr)
+library(parallelMap)
+
+
+data(Boston)
+
+# Little plot to remind me about what the Boston Housing dataset is like
+Boston %>% 
+  drop_na() %>% 
+  gather(key, value, -medv) %>% 
+  ggplot(aes(value, medv))+
+  geom_point()+
+  geom_smooth(method = "loess")+
+  facet_wrap(~key, scales = "free")+
+  labs(title = "Boston EDA Plot")+
+  theme_minimal()
+```
+
+
+Use rsample to split:
+
+```{r}
+train_test_split <- initial_split(Boston)
+train <- training(train_test_split)
+test <- testing(train_test_split)
+```
+
+Use recipes to preprocess: 
+
+```{r}
+rec_obj <- recipe(medv ~ ., data = train)
+recip <- rec_obj %>%
+  step_nzv(all_predictors()) %>% 
+  step_center(all_predictors()) %>% 
+  step_scale(all_predictors())
+
+
+trained_rec <- prep(recip, training = train)
+train_data <- bake(trained_rec, new_data = train)
+test_data  <- bake(trained_rec, new_data = test)
+```
+
+
+### Onto Model Validation / cross-validation:
+
+In the previous notebook, I did not crossvalidate or tune parameters. In real world settings this is ussually not the best option. We will typically want to use cross-validation to select optimal parameters for our learner.  The MLR package makes this quite easy to do (honestly easier than sklearn makes it). 
+
+In this notebook I will use XGboost to predict Boston Housing prices. XGboost is my machine learning algorithm and is frequently the most accurate learner in applied machine learning problems that use tabular data. 
+
+#### Cross-Validation:
+
+To peform simple cross validation, we create a cross validation object and pass this along with our task and learner to the MLR resample object.  
+
+```{r, warning = FALSE}
+
+# instantiate cv object
+cv_obj = makeResampleDesc("CV", iters = 5)
+
+
+# instantiate task
+ml_task = makeRegrTask(data = train_data, target = "medv")
+
+# instantiate learner
+lrn = makeLearner("regr.xgboost")
+
+# Train the learner
+mod = resample(lrn, task, cv_obj)
+
+```
+
+Wow, that was easy! What really will wow R users is how easy it is to use crossvalidation to select model parameters with MLR. It is quite frankly way to hard to do this with many R pacakges. 
+
+```{r}
+print(getParamSet(lrn))
+```
+
+
+```{r}
+# Define number of CPU cores to use when training models
+parallelStartSocket(8)
+
+cv_folds <- makeResampleDesc("CV", iters = 3) # 3 fold cross validation
+
+# Define model tuning algorithm ~ Random tune algorithm
+random_tune <- makeTuneControlRandom(maxit = 15L)  # 1 iteration for illustration purposes
+
+# Define model
+model <- makeLearner("regr.xgboost") 
+
+# Define parameters of model and search grid ~ !!!! MODEL SPECIFIC !!!!
+model_Params <- makeParamSet(
+  makeIntegerParam("nrounds",lower=10,upper=100),
+  makeIntegerParam("max_depth",lower=1,upper=length(train_data)),
+  makeNumericParam("lambda",lower=0.001,upper= 10),
+  makeNumericParam("eta", lower = 0.001, upper = 0.5),
+  makeNumericParam("subsample", lower = 0.10, upper = 0.80),
+  makeNumericParam("min_child_weight",lower=1,upper=5),
+  makeNumericParam("colsample_bytree",lower = 0.2,upper = 0.8), 
+  makeIntegerParam("early_stopping_rounds", lower = 6, upper =10),
+  makeIntegerParam("num_parallel_tree", lower = 30, upper = 2000)
+)
+
+
+# Tune model to find best performing parameter settings using random search algorithm
+tuned_model <- tuneParams(learner = model,
+                        task = ml_task,
+                        resampling = cv_folds,
+                        par.set = model_Params,
+                        control = random_tune,
+                        show.info = FALSE)
+
+# Apply optimal parameters to model
+model <- setHyperPars(learner = model,
+                        par.vals = tuned_model$x)
+# Train final model with tuned parameters
+xgBoost <- train(learner = model,task = ml_task)
+
+# Predict on test set
+preds <- predict(xgBoost, newdata = test_data)
+
+# Stop parallel instance ~ Good practice to retire cores when training is complete
+parallelStop()
+```
+
+We're able to do much better with our well tuned xgboost
+
+```{r}
+library(yardstick)
+bind_rows(yardstick::rsq(data = preds$data, truth = truth, estimate = response),
+yardstick::rmse(data = preds$data, truth = truth, estimate = response))
+```
+
+
+

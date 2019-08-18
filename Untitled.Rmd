@@ -1,0 +1,51 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library("dime")
+library("DALEX")
+```
+
+```{r}
+ titanic <- na.omit(titanic)
+ set.seed(1313)
+ titanic_small <- titanic[sample(1:nrow(titanic), 500), c(1,2,3,6,7,9)]
+
+ model_titanic_glm <- glm(survived == "yes" ~ gender + age + fare + class + sibsp,
+                          data = titanic_small, family = "binomial")
+
+```
+
+```{r}
+ explain_titanic_glm <- explain(model_titanic_glm,
+                                data = titanic_small[,-6],
+                                y = titanic_small$survived == "yes",
+                                label = "glm")
+```
+
+```{r}
+ explain_titanic_glm <- explain(model_titanic_glm,
+                                data = titanic_small[,-6],
+                                y = titanic_small$survived == "yes",
+                                label = "glm")
+```
+
+```{r}
+ explain_titanic_glm <- explain(model_titanic_glm,
+                                data = titanic_small[,-6],
+                                y = titanic_small$survived == "yes",
+                                label = "glm")
+```
+
+```{r}
+new_observations <- titanic_small[1:4,-6]
+rownames(new_observations) <- c("Lisa","James", "Thomas", "Nancy")
+
+modelStudio(explain_titanic_glm,
+             new_observations,
+             facet_dim = c(2,2), N = 200, B = 20, time = 0)
+```
+

@@ -1,0 +1,159 @@
+---
+title: "Case_study_"
+output: html_notebook
+---
+
+Case Study: 
+
+```{r}
+library(tidyverse)
+library(mlr)
+library(DataExplorer)
+library(lubridate)
+library(janitor)
+
+df = read_csv('https://raw.githubusercontent.com/susanli2016/Machine-Learning-with-Python/master/data/renfe_small.csv')%>% 
+clean_names() %>% 
+  
+mutate(time = start_date - end_date, time = as.numeric(time), start_day = day(start_date), start_month = factor(months(start_date), ordered = F),  start_wday = factor(wday(start_date, label = T), ordered = F), time_since_book = as.numeric(start_date - insert_date)) %>% 
+  
+  select(everything(), time_hours = time)
+```
+
+```{r}
+df %>% head()
+```
+
+`
+```{r}
+df %>% 
+  select_if(is.numeric) %>% 
+  gather(key, value) %>% 
+  ggplot(aes(value))+
+  geom_histogram(bins = 30)+
+  facet_wrap(~key, scales = "free")+
+  theme_minimal()+
+  labs(title = "Numeric Histograms", x = "")
+```
+
+```{r}
+df %>% 
+  select_if(is.character) %>% 
+  gather(key, value) %>% 
+  group_by(key) %>% 
+  count(value, sort = T) %>% 
+  drop_na() %>% 
+  ggplot(aes(reorder(value, n), n))+
+  geom_col()+
+  facet_wrap(~key, scales = "free", ncol = 2)+
+  coord_flip()+
+  labs(y = "Count", x = "", title = "Categorical Columns")+
+  theme_minimal()
+```
+
+```{r}
+model_frame = df %>% select(-insert_date, -start_date, -end_date) %>% 
+filter(!is.na(price))
+
+
+train_test_split <- initial_split(model_frame)
+train <- training(train_test_split)
+test <- testing(train_test_split)
+```
+
+
+```{r}
+rec_obj <- recipe(price ~., data = train)
+recip <- rec_obj %>%
+  step_dummy(all_nominal()) %>% 
+  step_nzv(all_predictors()) %>% 
+  step_corr(all_predictors()) %>% 
+  step_center(all_predictors()) %>% 
+  step_scale(all_predictors())
+
+
+trained_rec <- prep(recip, training = train)
+train_data <- bake(trained_rec, new_data = train)
+test_data  <- bake(trained_rec, new_data = test)
+```
+
+
+
+
+```{r}
+# Define number of CPU cores to use when training models
+parallelStartSocket(8)
+
+ml_task = makeRegrTask(data = train_data, target = "price")
+
+cv_folds <- makeResampleDesc("CV", iters = 5) # 3 fold cross validation
+
+# Define model tuning algorithm ~ Random tune algorithm
+random_tune <- makeTuneControlRandom(maxit = 15L)  # 1 iteration for illustration purposes
+
+# Define model
+model <- makeLearner("regr.xgboost") 
+
+# Define parameters of model and search grid ~ !!!! MODEL SPECIFIC !!!!
+model_Params <- makeParamSet(
+  makeIntegerParam("nrounds",lower=10,upper=100),
+  makeIntegerParam("max_depth",lower=1,upper=length(train_data)),
+  makeNumericParam("lambda",lower=0.001,upper= 10),
+  makeNumericParam("eta", lower = 0.001, upper = 0.5),
+  makeNumericParam("subsample", lower = 0.10, upper = 0.80),
+  makeNumericParam("min_child_weight",lower=1,upper=5),
+  makeNumericParam("colsample_bytree",lower = 0.2,upper = 0.8), 
+  makeIntegerParam("early_stopping_rounds", lower = 6, upper =10),
+  makeIntegerParam("num_parallel_tree", lower = 30, upper = 200)
+)
+
+
+# Tune model to find best performing parameter settings using random search algorithm
+tuned_model <- tuneParams(learner = model,
+                        task = ml_task,
+                        resampling = cv_folds,
+                        par.set = model_Params,
+                        control = random_tune,
+                        show.info = FALSE)
+
+# Apply optimal parameters to model
+model <- setHyperPars(learner = model,
+                        par.vals = tuned_model$x)
+# Train final model with tuned parameters
+xgBoost <- train(learner = model,task = ml_task)
+
+# Predict on test set
+preds <- predict(xgBoost, newdata = test_data)
+
+# Stop parallel instance ~ Good practice to retire cores when training is complete
+parallelStop()
+```
+
+```{r}
+library(yardstick)
+bind_rows(yardstick::rsq(data = preds$data, truth = truth, estimate = response),
+yardstick::rmse(data = preds$data, truth = truth, estimate = response))
+```
+
+```{r}
+preds$data %>% 
+  ggplot(aes(truth, response))+
+  geom_point()+ 
+  geom_smooth(method = 'loess')+
+  theme_minimal()
+```
+
+```{r}
+imps = getFeatureImportance(xgBoost)
+imps = imps$res %>% 
+  gather(key, value) %>% 
+  arrange(desc(value))
+
+imps %>% 
+  ggplot(aes(reorder(key, value), value))+
+  geom_col()+
+  coord_flip()+
+  theme_minimal()+
+  labs(x = "", y = "Feature Importance")
+```
+

@@ -1,0 +1,226 @@
+---
+title: "pysr's MLR notes"
+output: html_notebook
+---
+
+### Intro to MLR:
+
+MLR is a meta machine learning pacakge in R. I call it a meta machine learning package because like other packages in R (caret, parsnip) it provides a uniform interface, high level API to call functions from various R machine learning packages.   This makes it easy to iterate between and compare different classes of learners.
+
+
+```{r}
+# if you are a tidyverser like me, you should typically make it your first import. This helps to avoid conflicts with functions in other 
+# libraries
+library(tidyverse)
+library(mlr)
+data(iris)
+```
+
+MLR learning task (all this is loosely quoted from the MLR vignettes, this is only here for me to remember):
+
+"Learning tasks encapsulate the data set and further relevant information about a machine learning problem, for example the name of the target variable for supervised problems" - package vignette
+
+Tasks are organized in a hierarchy (all inherit from "super class" Task):
+
+RegrTask() - regression problems,
+ClassifTask() - basic binary and multiclass classification,
+SurvTask() - survival analysis,
+ClusterTask() - clustering,
+MultilabelTask() - multilabel classification problems,
+CostSensTask() - customized cost functions 
+
+
+All models need data and task id when instantiated. For this example I will use the R nnet package, which fits simple feed forward MLPs.  
+
+we can instantiate a task and a learner like this:
+
+
+```{r}
+# Generate the task
+task = makeClassifTask(data = iris, target = "Species")
+
+# Generate the learner
+lrn = makeLearner("classif.nnet")
+```
+
+
+We can train the learner like this:
+
+```{r}
+# Train the learner
+mod = train(lrn, task)
+```
+
+we can Inspect the model by calling the object
+
+```{r}
+mod
+```
+
+With just a few functions we can get some basic info about the models
+```{r}
+print("model ID:")
+print(getLearnerId(lrn))
+
+print("Learner type:")
+print(getLearnerType(lrn))
+
+print("Learner package")
+print(getLearnerPackages(lrn))
+```
+We can view info about hyperameters with various functions. 
+
+```{r}
+print("Current param settings:")
+print(getHyperPars(lrn))
+
+print("Get all pararms for models and there range:")
+print(getParamSet(lrn))
+```
+
+
+
+Now we can predict with our basic model using default hyperameters. The object returned by the predict method is more complex than what is typically returned by the method (I've found R users call these bizare functions that return something different for each kind of object thats passed to it methods. R does have a formal R6 class which is all OOP and such with attributes, methods etc...)
+
+```{r}
+pred_obj = predict(mod, task)
+pred_obj = pred_obj$data
+mean(pred_obj$truth == pred_obj$response)
+```
+
+The model has  ~ 99% accuracy, but this is in sample accuracy.  More than liklely than not, our model has overfit or fit too closely to the training data that was provided to it.  If new data from the data generating process were given to the model, it might not predict as well because it has learned low dimensional representations that are unqiue to the training set, and do not generalize to new sets of data from the generating process.
+
+
+### Train test splits
+
+I personally am a big fan of the recipes & rsample packages, which are both part of the larger tidymodels ecosystem.  In these notes I'd like to go thorugh using rsample and recipes to do preprocessing and also try out MLR's preprocessing to see if I like it better.
+
+Recipes and Rsample first! Let's try a regression problem with MLR. I'll use the Boston Housing dataset. I honestly forget the main structure of the Boston housing dataset (I should really have it down to memory by now). I'll run this quick snippet that gives me an overview of the relationship between the covariates and the outcome, medv.
+
+```{r, warning=FALSE}
+library(MASS)
+data(Boston)
+
+# Little plot to remind me about what the Boston Housing dataset is like
+Boston %>% 
+  drop_na() %>% 
+  gather(key, value, -medv) %>% 
+  ggplot(aes(value, medv))+
+  geom_point()+
+  geom_smooth(method = "loess")+
+  facet_wrap(~key, scales = "free")+
+  labs(title = "Boston EDA Plot")+
+  theme_minimal()
+```
+Quick check for NA values (I do remember there's no NA's but this is always a good sanity check)
+
+```{r}
+sum(is.na(Boston))
+```
+
+Here's another way to check
+
+```{r}
+library(DataExplorer)
+Boston %>% plot_missing()
+```
+
+
+#### Splitting the data into train and test sets
+
+##### Tidyverse preprocessing
+
+We can use the rsample::inital_split() function to split our data into train and test sets for model fitting.
+
+
+```{r, warning=FALSE}
+# unfortunatley I need to use the warning = FALSE for this chunk because the dev version of tidyr throws silly 
+# meaningless messages
+library(rsample)
+library(recipes)
+
+train_test_split <- initial_split(Boston)
+train <- training(train_test_split)
+test <- testing(train_test_split)
+```
+
+
+```{r}
+rec_obj <- recipe(medv ~ ., data = train)
+recip <- rec_obj %>%
+  step_nzv(all_predictors()) %>% 
+  step_center(all_predictors()) %>% 
+  step_scale(all_predictors())
+
+
+trained_rec <- prep(recip, training = train)
+train_data <- bake(trained_rec, new_data = train)
+test_data  <- bake(trained_rec, new_data = test)
+```
+
+Next I fit my model to the training data, and use the held out set to evaluate out of sample accuracy.
+
+```{r}
+# Generate the task
+task = makeRegrTask(data = train_data, target = "medv")
+
+# Generate the learner
+lrn = makeLearner("regr.nnet")
+
+# Train the learner
+mod = train(lrn, task)
+```
+
+```{r}
+library(yardstick)
+pred = predict(mod$learner.model, newdata = test_data)
+
+print("R squared:")
+yardstick::rsq_trad_vec(truth = test_data$medv, estimate = as.vector(pred))
+print("RMSE:")
+yardstick::rmse_vec(truth = test_data$medv, estimate = as.vector(pred))
+```
+
+##### MLR Preprocessing
+
+Lets try using MLR preprocessing:
+
+MLR has many preprocessing options available for the applied statistician. In MLR, preprocessing belongs to the learner (like in an sklearn pipeline), and is done whenever model fits / predicts.
+
+The vignette does a really good job of discerning between two types of preprocessing:
+
+1) Data Dependent
+2) Data Indepdent
+
+Data dependent steps learn from the data. For example, if we use the mean of a numeric vector to impute NA values in the vector we have learned (estimated a parameter) from the data. When we have only one observation to predict, we cannot learn / estimate a mean to impute, we need to use a learned mean from when we trained the algorithm. Thus, we need to try imputation on a test set to make sure that the preprocessing provides the algorithm enough information to generalize.  
+
+
+Data independet steps are not learned from data, thus can be just "filled in" if we only need to predict one point. For example if we imputed missing values with a zero, this isn't data dependent. 
+
+
+```{r}
+# Generate the task
+task = makeRegrTask(data = train, target = "medv")
+                    
+task = normalizeFeatures(task, method = "standardize")
+task = removeConstantFeatures(task)
+
+# Generate the learner
+lrn = makeLearner("regr.nnet")
+
+# Train the learner
+mod = train(lrn, task)
+```
+
+```{r}
+pred = predict(mod$learner.model, newdata = test)
+
+print("R squared:")
+yardstick::rsq_trad_vec(truth = test$medv, estimate = as.vector(pred))
+print("RMSE:")
+yardstick::rmse_vec(truth = test$medv, estimate = as.vector(pred))
+```
+ * Not sure why I am getting such bad held out accuracy when using MLR preprocessing
+ * Easy reliable preprocessing is simpler with recipes
+ 
+
