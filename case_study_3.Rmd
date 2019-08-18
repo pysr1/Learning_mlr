@@ -5,19 +5,29 @@ output: html_notebook
 
 Case Study: 
 
+To do: annotate notes
+
 ```{r}
 library(tidyverse)
+library(yardstick)
 library(mlr)
+library(rsample)
+library(recipes)
 library(DataExplorer)
 library(lubridate)
 library(janitor)
+library(parallelMap)
+library(iml)
 
+# read data and create better names
 df = read_csv('https://raw.githubusercontent.com/susanli2016/Machine-Learning-with-Python/master/data/renfe_small.csv')%>% 
 clean_names() %>% 
   
-mutate(time = start_date - end_date, time = as.numeric(time), start_day = day(start_date), start_month = factor(months(start_date), ordered = F),  start_wday = factor(wday(start_date, label = T), ordered = F), time_since_book = as.numeric(start_date - insert_date)) %>% 
+mutate(time = end_date - start_date, time = as.numeric(time), start_day = day(start_date), start_month = factor(months(start_date), ordered = F),  start_wday = factor(wday(start_date, label = T), ordered = F), time_since_book = as.numeric(start_date - insert_date)) %>% 
   
   select(everything(), time_hours = time)
+
+# create time features and change the name of a column
 ```
 
 ```{r}
@@ -36,7 +46,7 @@ df %>%
   labs(title = "Numeric Histograms", x = "")
 ```
 
-```{r}
+```{r, fig.height=8}
 df %>% 
   select_if(is.character) %>% 
   gather(key, value) %>% 
@@ -67,9 +77,9 @@ rec_obj <- recipe(price ~., data = train)
 recip <- rec_obj %>%
   step_dummy(all_nominal()) %>% 
   step_nzv(all_predictors()) %>% 
-  step_corr(all_predictors()) %>% 
-  step_center(all_predictors()) %>% 
-  step_scale(all_predictors())
+  step_corr(all_predictors())
+  #step_center(all_predictors()) %>% 
+  #step_scale(all_predictors())
 
 
 trained_rec <- prep(recip, training = train)
@@ -86,15 +96,15 @@ parallelStartSocket(8)
 
 ml_task = makeRegrTask(data = train_data, target = "price")
 
-cv_folds <- makeResampleDesc("CV", iters = 5) # 3 fold cross validation
+cv_folds <- makeResampleDesc("CV", iters = 5) 
 
-# Define model tuning algorithm ~ Random tune algorithm
-random_tune <- makeTuneControlRandom(maxit = 15L)  # 1 iteration for illustration purposes
 
-# Define model
+random_tune <- makeTuneControlRandom(maxit = 15L) 
+
+
 model <- makeLearner("regr.xgboost") 
 
-# Define parameters of model and search grid ~ !!!! MODEL SPECIFIC !!!!
+
 model_Params <- makeParamSet(
   makeIntegerParam("nrounds",lower=10,upper=100),
   makeIntegerParam("max_depth",lower=1,upper=length(train_data)),
@@ -108,7 +118,7 @@ model_Params <- makeParamSet(
 )
 
 
-# Tune model to find best performing parameter settings using random search algorithm
+
 tuned_model <- tuneParams(learner = model,
                         task = ml_task,
                         resampling = cv_folds,
@@ -116,21 +126,20 @@ tuned_model <- tuneParams(learner = model,
                         control = random_tune,
                         show.info = FALSE)
 
-# Apply optimal parameters to model
+
 model <- setHyperPars(learner = model,
                         par.vals = tuned_model$x)
-# Train final model with tuned parameters
+
 xgBoost <- train(learner = model,task = ml_task)
 
-# Predict on test set
+
 preds <- predict(xgBoost, newdata = test_data)
 
-# Stop parallel instance ~ Good practice to retire cores when training is complete
+
 parallelStop()
 ```
 
 ```{r}
-library(yardstick)
 bind_rows(yardstick::rsq(data = preds$data, truth = truth, estimate = response),
 yardstick::rmse(data = preds$data, truth = truth, estimate = response))
 ```
@@ -143,7 +152,8 @@ preds$data %>%
   theme_minimal()
 ```
 
-```{r}
+```{r, warning=FALSE}
+parallelStartSocket(8)
 imps = getFeatureImportance(xgBoost)
 imps = imps$res %>% 
   gather(key, value) %>% 
@@ -155,5 +165,22 @@ imps %>%
   coord_flip()+
   theme_minimal()+
   labs(x = "", y = "Feature Importance")
+parallelStop()
+```
+```{r}
+predictor = Predictor$new(xgBoost, data = test_data %>% select(-price), y = test_data %>% select(price))
+imp = FeatureImp$new(predictor, loss = "mse")
+plot(imp)
+```
+
+```{r}
+plot(imp) + 
+  theme_minimal()+
+  labs(title = "Permutation Feature Importance")
+```
+
+```{r}
+shap = Shapley$new(predictor = predictor, x.interest = test_data %>% tail(1))
+shap$plot()
 ```
 
